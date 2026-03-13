@@ -6,7 +6,9 @@ socket.on("update_stats", (data) => {
     if(data.balance) document.getElementById('balance').innerText = data.balance;
     if(data.tasks) document.getElementById('tasks').innerText = data.tasks;
 });
-
+socket.on("update_rank", (data) => {
+    if(data.rank) document.getElementById('rank').innerText = "#" + data.rank;
+});
 socket.on("show_money_alert", () => {
     document.getElementById('alert-overlay').classList.remove('hidden');
 });
