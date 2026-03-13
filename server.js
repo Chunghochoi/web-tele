@@ -3,70 +3,71 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const requestIp = require('request-ip');
 
-// Thư viện Telegram (GramJS)
 const { Api, TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
-const input = require("input"); // Để nhập code OTP ở terminal lần đầu
+const input = require("input");
 
 const app = express();
 app.use(cors());
 app.use(express.static(__dirname)); 
+app.get('/', (req, res) => { res.sendFile(__dirname + '/index.html'); });
 
-// Dòng này bắt server trả về file giao diện (index.html) khi truy cập link web
-app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
-});
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- CẤU HÌNH TELEGRAM ---
-const apiId = parseInt(process.env.API_ID); // Sẽ setup ở file .env
+const apiId = parseInt(process.env.API_ID); 
 const apiHash = process.env.API_HASH;
-// Lấy session từ biến môi trường (dùng khi deploy), nếu không có thì tạo mới (chạy local)
 const stringSession = new StringSession(process.env.TELEGRAM_SESSION || "");
 
 const client = new TelegramClient(stringSession, apiId, apiHash, { connectionRetries: 5 });
 
-// Biến lưu trữ trạng thái
 let botUsername = "CryptoMoney_Bot";
-let pendingTasks = {}; // Lưu { messageId: { url, clickData } }
-let withdrawState = "IDLE";
-let currentBalance = 0;
+let pendingTasks = {}; 
 let isAutoMode = false;
-let autoDelay = 5; // Giây
+let autoDelay = 5; 
 
-// --- KẾT NỐI TELEGRAM ---
 async function startTelegram() {
     await client.start({
-        phoneNumber: async () => await input.text("Nhập số điện thoại (VD: +84987...): "),
-        password: async () => await input.text("Nhập mật khẩu 2FA (nếu có): "),
-        phoneCode: async () => await input.text("Nhập mã OTP Telegram gửi về: "),
-        onError: (err) => console.log("Lỗi Telegram:", err),
+        phoneNumber: async () => await input.text("SĐT: "),
+        password: async () => await input.text("2FA: "),
+        phoneCode: async () => await input.text("OTP: "),
+        onError: (err) => console.log(err),
     });
-    console.log("✅ Đã đăng nhập Telegram thành công!");
-    
-    // RẤT QUAN TRỌNG: Lưu chuỗi này lại để lát điền vào Render.com
-    console.log("🔑 STRING SESSION CỦA BẠN (LƯU LẠI ĐỂ DEPLOY):");
-    console.log(client.session.save());
+    console.log("✅ Đã kết nối Telegram!");
 }
 
-// --- LẮNG NGHE TIN NHẮN TỪ BOT ---
 client.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message || message.peerId.userId?.toString() !== "ID_CỦA_BOT") return; // Lọc tin nhắn (Cần check ID thật của bot sau)
-    
+    if (!message) return;
     const text = message.message || "";
 
-    // 1. Quét Số dư & Nhiệm vụ
+    // 🔴 SỬA LỖI 4: ĐỌC SỐ DƯ & NHIỆM VỤ (/view)
     if (text.includes("Số dư:") && text.includes("NV hôm nay:")) {
-        const balance = text.match(/Số dư:\s*(\d+)đ/i)?.[1];
-        const tasks = text.match(/NV hôm nay:\s*(\d+\/\d+)/i)?.[1];
-        io.emit("update_stats", { balance, tasks });
+        // Dùng Regex \s*([\d,.]+) để lấy mọi con số sau chữ Số dư:
+        const balanceMatch = text.match(/Số dư:\s*([\d,.]+)/i);
+        const taskMatch = text.match(/NV hôm nay:\s*([\d]+\/[\d]+)/i);
+        
+        if (balanceMatch || taskMatch) {
+            io.emit("update_stats", { 
+                balance: balanceMatch ? balanceMatch[1] : null, 
+                tasks: taskMatch ? taskMatch[1] : null 
+            });
+        }
     }
 
-    // 2. Quét nút "Mở link" và "Kiểm tra hoàn thành"
+    // 🔴 SỬA LỖI 5: ĐỌC BẢNG XẾP HẠNG (/top) CỦA BẠN
+    if (text.includes("Bảng xếp hạng")) {
+        // Tìm chữ # kèm số, theo sau là khoảng trắng và tên Chungdacoeim
+        const rankMatch = text.match(/#(\d+)\s+Chungdacoeim/i);
+        if (rankMatch) {
+            io.emit("update_rank", { rank: rankMatch[1] }); // Gửi thứ hạng về Web
+        } else {
+            io.emit("update_rank", { rank: "Chưa lọt top" });
+        }
+    }
+
+    // Bắt nút Inline Keyboard (Lấy link và data nút Hoàn thành)
     if (message.replyMarkup && message.replyMarkup.rows) {
         let taskUrl = "";
         let buttonData = null;
@@ -80,85 +81,66 @@ client.addEventHandler(async (event) => {
 
         if (taskUrl && buttonData) {
             pendingTasks[message.id] = { url: taskUrl, clickData: buttonData };
-            // Phát link cho các thiết bị (Extensions)
-            distributeLink(message.id, taskUrl);
+            io.emit("do_task", { messageId: message.id, url: taskUrl }); 
         }
     }
 
-    // 3. Quét duyệt thành công
+    // Bắt duyệt tiền
     if (text.includes("Admin đã duyệt nhiệm vụ của bạn!")) {
-        io.emit("log_msg", "Nhiệm vụ hoàn thành! +Tiền");
-        // Nếu đang bật Auto, xin link mới
-        if (isAutoMode) {
-            setTimeout(async () => {
-                await client.sendMessage(botUsername, { message: '/uptolink2step' });
-            }, autoDelay * 1000);
-        }
-    }
-
-    // 4. Logic Rút Tiền
-    if (text.includes("Nhập tên ngân hàng")) {
-        withdrawState = "BANK";
-        currentBalance = text.match(/Số dư:\s*(\d+)đ/i)?.[1] || 0;
-        await client.sendMessage(botUsername, { message: 'Momo' });
-    } else if (withdrawState === "BANK" && text.includes("Nhập tên chủ tài khoản")) {
-        withdrawState = "NAME";
-        await client.sendMessage(botUsername, { message: 'DANG VAN CHUNG' });
-    } else if (withdrawState === "NAME" && text.includes("Nhập số tiền muốn rút")) {
-        withdrawState = "IDLE";
-        await client.sendMessage(botUsername, { message: currentBalance.toString() });
-    } else if (text.includes("đã được duyệt!")) {
-        io.emit("show_money_alert");
+        io.emit("log_msg", "Nhiệm vụ hoàn thành!");
     }
 });
 
-// --- SOCKET.IO LẮNG NGHE TỪ DASHBOARD & EXTENSION ---
 io.on('connection', (socket) => {
-    const clientIp = requestIp.getClientIp(socket.request);
-    console.log(`[+] Thiết bị kết nối: ${socket.id} (IP: ${clientIp})`);
+    console.log(`[+] Có thiết bị kết nối`);
 
-    // Lệnh từ Dashboard
+    // 🔴 SỬA LỖI 1: LOGIC AUTO-PPLINK KHI BẤM NÚT
     socket.on('send_cmd', async (cmd) => {
-        await client.sendMessage(botUsername, { message: cmd });
-    });
-
-    socket.on('toggle_auto', (data) => {
-        isAutoMode = data.isOn;
-        autoDelay = data.delay;
-        if (isAutoMode) {
-            // Đếm thiết bị (chỉ tính extension) và gửi lệnh xin link
-            client.sendMessage(botUsername, { message: '/uptolink2step' });
+        // Nếu đang bật Auto VÀ bấm nút uptolink
+        if (isAutoMode && (cmd === '/uptolink2step' || cmd === '/uptolink3step')) {
+            // Đếm số lượng máy (tab) đang kết nối tới server
+            const deviceCount = io.engine.clientsCount; 
+            console.log(`[Auto] Đang gửi ${deviceCount} lệnh cho ${deviceCount} thiết bị...`);
+            
+            for(let i = 0; i < deviceCount; i++) {
+                await client.sendMessage(botUsername, { message: cmd });
+                // Delay giữa các lệnh
+                if (i < deviceCount - 1) await new Promise(r => setTimeout(r, autoDelay * 1000));
+            }
+        } else {
+            // Nếu không bật Auto thì gửi bình thường 1 lệnh
+            await client.sendMessage(botUsername, { message: cmd });
         }
     });
 
-    // Extension báo đã xem xong link (chờ tab đổi url)
+    // Chỉ lưu trạng thái On/Off, KHÔNG gửi lệnh tự động ở đây nữa
+    socket.on('toggle_auto', (data) => {
+        isAutoMode = data.isOn;
+        autoDelay = data.delay;
+    });
+
+    // Nhận tín hiệu URL đích từ Extension và bấm nút trên Telegram
     socket.on('target_reached', async (data) => {
         const msgId = data.messageId;
         const task = pendingTasks[msgId];
         if (task && task.clickData) {
-            console.log(`Bấm nút kiểm tra cho tin nhắn ${msgId}...`);
+            console.log(`Đang bấm nút kiểm tra hoàn thành cho tin nhắn ${msgId}...`);
             try {
-                // API Gửi tín hiệu bấm nút "Kiểm tra hoàn thành"
                 await client.invoke(new Api.messages.GetBotCallbackAnswer({
                     peer: botUsername,
                     msgId: msgId,
                     data: task.clickData
                 }));
                 delete pendingTasks[msgId];
-            } catch (err) { console.error("Lỗi bấm nút:", err); }
+                
+                // Cập nhật lại stats sau khi xong 1 link
+                setTimeout(() => client.sendMessage(botUsername, { message: '/view' }), 2000);
+            } catch (err) { console.error("Lỗi API bấm nút:", err); }
         }
     });
 });
 
-// Hàm chia link cho extension
-function distributeLink(messageId, url) {
-    // Phát cho tất cả extension (Broadcast). Extension nào rảnh sẽ nhận.
-    // Trong thực tế cần logic array quản lý thiết bị rảnh/bận chi tiết hơn.
-    io.emit("do_task", { messageId, url }); 
-}
-
-// Khởi chạy
 server.listen(3000, async () => {
-    console.log('Server chạy tại http://localhost:3000');
+    console.log('Server chạy port 3000');
     await startTelegram();
 });
