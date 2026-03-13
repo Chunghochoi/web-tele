@@ -42,12 +42,14 @@ client.addEventHandler(async (event) => {
     if (!message) return;
     const text = message.message || "";
 
-    // 🔴 SỬA LỖI 4: ĐỌC SỐ DƯ & NHIỆM VỤ (/view)
+    // -- PHẦN THEO DÕI LOG BẮT TIN NHẮN TỪ BOT --
+    // In ra text tin nhắn để kiểm tra
+    if (text) console.log("📩 Tin nhắn từ Telegram:", text.substring(0, 50) + "...");
+
+    // Cập nhật Số dư & NV
     if (text.includes("Số dư:") && text.includes("NV hôm nay:")) {
-        // Dùng Regex \s*([\d,.]+) để lấy mọi con số sau chữ Số dư:
         const balanceMatch = text.match(/Số dư:\s*([\d,.]+)/i);
         const taskMatch = text.match(/NV hôm nay:\s*([\d]+\/[\d]+)/i);
-        
         if (balanceMatch || taskMatch) {
             io.emit("update_stats", { 
                 balance: balanceMatch ? balanceMatch[1] : null, 
@@ -56,86 +58,88 @@ client.addEventHandler(async (event) => {
         }
     }
 
-    // 🔴 SỬA LỖI 5: ĐỌC BẢNG XẾP HẠNG (/top) CỦA BẠN
+    // Cập nhật Top
     if (text.includes("Bảng xếp hạng")) {
-        // Tìm chữ # kèm số, theo sau là khoảng trắng và tên Chungdacoeim
         const rankMatch = text.match(/#(\d+)\s+Chungdacoeim/i);
-        if (rankMatch) {
-            io.emit("update_rank", { rank: rankMatch[1] }); // Gửi thứ hạng về Web
-        } else {
-            io.emit("update_rank", { rank: "Chưa lọt top" });
-        }
+        io.emit("update_rank", { rank: rankMatch ? rankMatch[1] : "Chưa lọt top" });
     }
 
-    // Bắt nút Inline Keyboard (Lấy link và data nút Hoàn thành)
+    // Cập nhật trạng thái duyệt tiền
+    if (text.includes("Admin đã duyệt nhiệm vụ của bạn!")) {
+        console.log("✅ Bot đã duyệt nhiệm vụ!");
+        io.emit("log_msg", "Nhiệm vụ hoàn thành!");
+    }
+
+    // -- SỬA LỖI ĐỌC NÚT BẤM (INLINE BUTTONS) --
     if (message.replyMarkup && message.replyMarkup.rows) {
+        console.log("🔍 Phát hiện tin nhắn có chứa Nút bấm!");
         let taskUrl = "";
         let buttonData = null;
 
         message.replyMarkup.rows.forEach(row => {
             row.buttons.forEach(btn => {
-                if (btn.text.includes("Mở link") && btn.url) taskUrl = btn.url;
-                if (btn.text.includes("Kiểm tra hoàn thành")) buttonData = btn.data;
+                // Tùy phiên bản GramJS, text có thể nằm ở btn.text hoặc btn.button.text
+                const btnText = btn.text || (btn.button && btn.button.text) || "";
+                
+                if (btnText.includes("Mở link") && btn.url) {
+                    taskUrl = btn.url;
+                    console.log("🔗 Lấy được URL:", taskUrl);
+                }
+                if (btnText.includes("Kiểm tra hoàn thành")) {
+                    buttonData = btn.data;
+                    console.log("💾 Lấy được Data nút Kiểm tra.");
+                }
             });
         });
 
         if (taskUrl && buttonData) {
             pendingTasks[message.id] = { url: taskUrl, clickData: buttonData };
-            io.emit("do_task", { messageId: message.id, url: taskUrl }); 
+            console.log("🚀 Đang gửi link cho Extension mở tab...");
+            
+            // Ép gửi bằng Broadcast cho tất cả thiết bị
+            io.sockets.emit("do_task", { messageId: message.id, url: taskUrl }); 
         }
-    }
-
-    // Bắt duyệt tiền
-    if (text.includes("Admin đã duyệt nhiệm vụ của bạn!")) {
-        io.emit("log_msg", "Nhiệm vụ hoàn thành!");
     }
 });
 
 io.on('connection', (socket) => {
-    console.log(`[+] Có thiết bị kết nối`);
+    console.log(`[+] Có thiết bị kết nối (ID: ${socket.id})`);
 
-    // 🔴 SỬA LỖI 1: LOGIC AUTO-PPLINK KHI BẤM NÚT
     socket.on('send_cmd', async (cmd) => {
-        // Nếu đang bật Auto VÀ bấm nút uptolink
         if (isAutoMode && (cmd === '/uptolink2step' || cmd === '/uptolink3step')) {
-            // Đếm số lượng máy (tab) đang kết nối tới server
-            const deviceCount = io.engine.clientsCount; 
-            console.log(`[Auto] Đang gửi ${deviceCount} lệnh cho ${deviceCount} thiết bị...`);
-            
-            for(let i = 0; i < deviceCount; i++) {
-                await client.sendMessage(botUsername, { message: cmd });
-                // Delay giữa các lệnh
-                if (i < deviceCount - 1) await new Promise(r => setTimeout(r, autoDelay * 1000));
-            }
+            // Tạm thời fix số lượng thiết bị là 1 để test tránh bị Telegram block do gửi lệnh quá nhanh
+            const deviceCount = 1; 
+            console.log(`[Auto] Đang gửi lệnh ${cmd}...`);
+            await client.sendMessage(botUsername, { message: cmd });
         } else {
-            // Nếu không bật Auto thì gửi bình thường 1 lệnh
+            console.log(`[Manual] Đang gửi lệnh ${cmd}...`);
             await client.sendMessage(botUsername, { message: cmd });
         }
     });
 
-    // Chỉ lưu trạng thái On/Off, KHÔNG gửi lệnh tự động ở đây nữa
     socket.on('toggle_auto', (data) => {
         isAutoMode = data.isOn;
         autoDelay = data.delay;
+        console.log(`⚙️ Auto mode: ${isAutoMode ? 'ON' : 'OFF'}, Delay: ${autoDelay}s`);
     });
 
-    // Nhận tín hiệu URL đích từ Extension và bấm nút trên Telegram
     socket.on('target_reached', async (data) => {
         const msgId = data.messageId;
+        console.log(`🎯 Extension báo đã đến đích! Chuẩn bị bấm nút cho tin nhắn ${msgId}...`);
+        
         const task = pendingTasks[msgId];
         if (task && task.clickData) {
-            console.log(`Đang bấm nút kiểm tra hoàn thành cho tin nhắn ${msgId}...`);
             try {
                 await client.invoke(new Api.messages.GetBotCallbackAnswer({
                     peer: botUsername,
                     msgId: msgId,
                     data: task.clickData
                 }));
+                console.log(`✅ Đã gửi tín hiệu API bấm nút "Kiểm tra hoàn thành"!`);
                 delete pendingTasks[msgId];
                 
-                // Cập nhật lại stats sau khi xong 1 link
                 setTimeout(() => client.sendMessage(botUsername, { message: '/view' }), 2000);
-            } catch (err) { console.error("Lỗi API bấm nút:", err); }
+            } catch (err) { console.error("❌ Lỗi API bấm nút:", err); }
         }
     });
 });
