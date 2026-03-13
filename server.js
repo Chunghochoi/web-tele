@@ -12,6 +12,12 @@ const input = require("input"); // Để nhập code OTP ở terminal lần đ�
 
 const app = express();
 app.use(cors());
+app.use(express.static(__dirname)); 
+
+// Dòng này bắt server trả về file giao diện (index.html) khi truy cập link web
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/index.html');
+});
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
